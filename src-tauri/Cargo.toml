@@ -3,6 +3,7 @@ name = "tauri-ftp-server"
 version = "0.1.0"
 description = "轻型 FTP + HTTP 文件服务器"
 authors = ["Local"]
+license = "MIT"
 edition = "2021"
 rust-version = "1.77"
 

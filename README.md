@@ -1,5 +1,7 @@
 # 轻型文件服务器
 
+> 基于 Tauri 2 + Rust 的 Windows 桌面 FTP/HTTP 文件服务器，支持匿名访问与 Portable 单文件构建。
+
 一个基于 Tauri 2 + Rust 的 Windows 桌面文件服务器，提供：
 
 - FTP 服务：匿名登录、PASV/EPSV 被动模式、目录浏览、下载
@@ -28,6 +30,7 @@
 ├─build.ps1               # Windows 发布构建
 ├─build.bat               # Windows 发布构建（双击）
 ├─dev.ps1                 # 开发调试
+├─LICENSE                 # MIT 开源许可证
 ├─.gitignore              # Git 忽略规则（依赖、构建产物、日志）
 └─.gitattributes          # 换行符与二进制文件规则
 ```
@@ -184,3 +187,7 @@ portable\轻型文件服务器.exe
 ```
 
 这是不需要安装程序的单个应用 EXE，可直接复制到其他 Windows 电脑运行。由于 Tauri 使用 WebView2，目标电脑仍需要可用的 WebView2 Runtime；该 Portable EXE 本身不会把 WebView2 Runtime 静态塞进一个文件中。
+
+## 许可证
+
+本项目采用 [MIT 许可证](LICENSE) 发布，Copyright (c) 2026 chai。
