@@ -1,5 +1,3 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-
 use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
 use std::{
