@@ -1,0 +1,13 @@
+# 统一换行符：仓库内保存 LF，检出时由 Git 自动转换
+* text=auto
+
+# Windows 脚本保留 CRLF，避免 cmd.exe / PowerShell 出错
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 二进制资源
+*.ico binary
+*.png binary
+*.exe binary
+*.dll binary
