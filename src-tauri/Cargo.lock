@@ -3705,6 +3705,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "dirs",
+ "http-body-util",
  "mime_guess",
  "percent-encoding",
  "rfd",

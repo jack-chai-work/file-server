@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>文件服务器 · 文件浏览</title>
+  <link rel="stylesheet" href="/_assets/app.css">
+  <script src="/_assets/app.js" defer></script>
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-icon" aria-hidden="true">📁</span>
+        <div class="brand-text">
+          <h1 class="brand-title">文件服务器</h1>
+          <p class="brand-sub" id="brandSub">正在加载文件列表…</p>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <span class="badge badge-loading" id="modeBadge">加载中</span>
+        <button type="button" class="btn btn-ghost" id="refreshBtn" title="重新加载当前文件夹">↻ 刷新</button>
+        <div class="write-actions" id="writeActions" hidden>
+          <button type="button" class="btn btn-secondary" id="uploadFileBtn">⬆ 上传文件</button>
+          <button type="button" class="btn btn-secondary" id="uploadDirBtn">🗂 上传文件夹</button>
+          <button type="button" class="btn btn-primary" id="newFolderBtn">＋ 新建文件夹</button>
+        </div>
+      </div>
+    </header>
+
+    <input type="file" id="fileInput" class="visually-hidden" multiple tabindex="-1" aria-hidden="true">
+    <input type="file" id="dirInput" class="visually-hidden" webkitdirectory directory multiple tabindex="-1" aria-hidden="true">
+
+    <main class="layout">
+      <aside class="card sidebar" aria-label="分类导航">
+        <div class="sidebar-head">
+          <h2 class="panel-title">分类导航</h2>
+          <span class="sidebar-total" id="navTotal">0 项</span>
+        </div>
+        <nav class="cat-nav" id="catNav"></nav>
+      </aside>
+
+      <section class="content">
+        <div class="readonly-bar" id="readonlyBar" hidden>
+          <span class="readonly-icon" aria-hidden="true">🔒</span>
+          <span>只读模式：服务器未开启匿名写入，可以浏览和下载，但不能上传文件或新建文件夹。</span>
+        </div>
+
+        <div class="card toolbar">
+          <nav class="breadcrumb" id="breadcrumb" aria-label="当前位置"></nav>
+          <div class="toolbar-row">
+            <div class="left-tools">
+              <button type="button" class="btn btn-ghost" id="upBtn">↑ 上一级</button>
+              <div class="sort-bar" id="sortBar" role="group" aria-label="排序方式">
+                <span class="sort-label" aria-hidden="true">排序</span>
+                <button type="button" class="sort-btn" data-sort="name">名称<span class="sort-arrow" aria-hidden="true"></span></button>
+                <button type="button" class="sort-btn" data-sort="size">大小<span class="sort-arrow" aria-hidden="true"></span></button>
+                <button type="button" class="sort-btn" data-sort="modified">修改时间<span class="sort-arrow" aria-hidden="true"></span></button>
+                <button type="button" class="sort-btn" data-sort="ext">类型<span class="sort-arrow" aria-hidden="true"></span></button>
+              </div>
+            </div>
+            <div class="view-toggle" role="group" aria-label="展示方式">
+              <button type="button" class="toggle-btn is-active" id="groupedViewBtn" aria-pressed="true">分类展示</button>
+              <button type="button" class="toggle-btn" id="flatViewBtn" aria-pressed="false">平铺列表</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card content-card" id="contentCard" aria-live="polite" aria-busy="true"></div>
+        <div class="stats" id="statsLine"></div>
+      </section>
+    </main>
+
+    <div class="drop-overlay" id="dropOverlay" hidden>
+      <div class="drop-card">
+        <div class="drop-icon" aria-hidden="true">⬆</div>
+        <p class="drop-title">释放以上传到当前文件夹</p>
+        <p class="drop-hint" id="dropHint">支持多选文件与整个文件夹</p>
+      </div>
+    </div>
+
+    <section class="transfer-panel" id="transferPanel" aria-label="上传进度" hidden>
+      <div class="transfer-head">
+        <strong class="transfer-title" id="transferTitle">正在上传…</strong>
+        <button type="button" class="icon-btn" id="transferCloseBtn" aria-label="关闭上传面板" title="关闭">✕</button>
+      </div>
+      <div class="progress-track" id="progressBar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+        <div class="progress-fill" id="progressFill"></div>
+      </div>
+      <div class="transfer-meta">
+        <span id="progressText">0%</span>
+        <span id="progressDetail">0 B / 0 B</span>
+      </div>
+      <div class="transfer-body" id="transferBody" hidden></div>
+    </section>
+
+    <div class="modal-backdrop" id="modalBackdrop" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+        <div class="modal-head">
+          <h2 class="modal-title" id="modalTitle">新建文件夹</h2>
+          <button type="button" class="icon-btn" id="mkCloseBtn" aria-label="关闭">✕</button>
+        </div>
+        <form id="mkForm" novalidate>
+          <label class="field">
+            <span class="field-label">文件夹名称</span>
+            <input type="text" id="mkName" name="folderName" autocomplete="off" maxlength="255" placeholder="例如：照片、资料 2026" spellcheck="false">
+          </label>
+          <p class="field-error" id="mkError" hidden></p>
+          <p class="field-hint">名称不能包含 / \ : 等字符，不能是 . 或 ..</p>
+          <div class="modal-actions">
+            <button type="button" class="btn btn-ghost" id="mkCancelBtn">取消</button>
+            <button type="submit" class="btn btn-primary" id="mkSubmitBtn">创建</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <div class="toast-root" id="toastRoot" aria-live="polite" aria-atomic="false"></div>
+  </div>
+
+  <noscript>
+    <div class="noscript">本页面需要启用 JavaScript 才能浏览文件，请启用 JavaScript 后刷新页面。</div>
+  </noscript>
+</body>
+</html>

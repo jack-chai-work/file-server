@@ -1,18 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use axum::{
-    body::Body,
-    extract::State,
-    http::{header, HeaderMap, HeaderValue, StatusCode, Uri},
-    response::{IntoResponse, Response},
-    routing::get,
-    Router,
-};
-use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
+use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
-    io,
     net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
     path::{Path, PathBuf},
     sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex},
@@ -28,7 +19,14 @@ use tokio::{
     sync::watch,
     time::timeout,
 };
-use tokio_util::io::ReaderStream;
+
+pub mod http;
+
+#[cfg(test)]
+mod ftp_tests;
+
+#[cfg(test)]
+mod http_tests;
 
 const APP_NAME: &str = "TauriFtpServer";
 const CONFIG_FILE: &str = "config.json";
@@ -98,7 +96,7 @@ impl AppState {
     }
 }
 
-type LogSink = Arc<Mutex<Vec<String>>>;
+pub type LogSink = Arc<Mutex<Vec<String>>>;
 
 fn config_path() -> PathBuf {
     dirs::config_dir()
@@ -123,7 +121,7 @@ fn save_config_file(config: &ServerConfig) -> Result<(), String> {
     fs::write(path, text).map_err(|e| format!("写入配置失败：{e}"))
 }
 
-fn log_line(logs: &LogSink, message: impl AsRef<str>) {
+pub(crate) fn log_line(logs: &LogSink, message: impl AsRef<str>) {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
@@ -188,7 +186,7 @@ fn validate_config(config: &ServerConfig) -> Result<PathBuf, String> {
     fs::canonicalize(root).map_err(|e| format!("无法访问共享目录：{e}"))
 }
 
-fn normalize_virtual_path(base: &str, input: &str) -> Result<String, String> {
+pub(crate) fn normalize_virtual_path(base: &str, input: &str) -> Result<String, String> {
     let decoded = percent_decode_str(input).decode_utf8_lossy().replace('\\', "/");
     let mut parts: Vec<String> = if decoded.starts_with('/') {
         Vec::new()
@@ -219,7 +217,7 @@ fn normalize_virtual_path(base: &str, input: &str) -> Result<String, String> {
     }
 }
 
-fn virtual_to_local(root: &Path, virtual_path: &str) -> PathBuf {
+pub(crate) fn virtual_to_local(root: &Path, virtual_path: &str) -> PathBuf {
     let mut path = root.to_path_buf();
     for part in virtual_path.split('/').filter(|x| !x.is_empty()) {
         path.push(part);
@@ -227,7 +225,7 @@ fn virtual_to_local(root: &Path, virtual_path: &str) -> PathBuf {
     path
 }
 
-fn ensure_inside(root: &Path, candidate: &Path, allow_missing_leaf: bool) -> Result<PathBuf, String> {
+pub(crate) fn ensure_inside(root: &Path, candidate: &Path, allow_missing_leaf: bool) -> Result<PathBuf, String> {
     let root = fs::canonicalize(root).map_err(|e| format!("共享目录不可访问：{e}"))?;
     if candidate.exists() {
         let canonical = fs::canonicalize(candidate).map_err(|e| format!("无法访问目标：{e}"))?;
@@ -247,132 +245,18 @@ fn ensure_inside(root: &Path, candidate: &Path, allow_missing_leaf: bool) -> Res
     Ok(candidate.to_path_buf())
 }
 
-fn safe_existing(root: &Path, candidate: &Path) -> Result<PathBuf, String> {
+pub(crate) fn safe_existing(root: &Path, candidate: &Path) -> Result<PathBuf, String> {
     ensure_inside(root, candidate, false)
 }
 
-fn safe_for_write(root: &Path, candidate: &Path) -> Result<PathBuf, String> {
+pub(crate) fn safe_for_write(root: &Path, candidate: &Path) -> Result<PathBuf, String> {
     ensure_inside(root, candidate, true)
 }
 
-#[derive(Clone)]
-struct HttpState {
-    root: Arc<PathBuf>,
-    logs: LogSink,
-}
-
-async fn http_handler(State(state): State<HttpState>, uri: Uri) -> Response {
-    let raw = uri.path();
-    let virtual_path = match normalize_virtual_path("/", raw) {
-        Ok(p) => p,
-        Err(_) => return simple_response(StatusCode::BAD_REQUEST, "无效路径"),
-    };
-    let local = virtual_to_local(state.root.as_path(), &virtual_path);
-    let local = match safe_existing(state.root.as_path(), &local) {
-        Ok(p) => p,
-        Err(_) => return simple_response(StatusCode::NOT_FOUND, "文件或目录不存在"),
-    };
-
-    match fs::metadata(&local) {
-        Ok(metadata) if metadata.is_dir() => match render_directory(&virtual_path, &local) {
-            Ok(html) => {
-                log_line(&state.logs, format!("HTTP 目录浏览：{}", virtual_path));
-                let mut headers = HeaderMap::new();
-                headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"));
-                (StatusCode::OK, headers, html).into_response()
-            }
-            Err(_) => simple_response(StatusCode::INTERNAL_SERVER_ERROR, "无法读取目录"),
-        },
-        Ok(metadata) if metadata.is_file() => match File::open(&local).await {
-            Ok(file) => {
-                log_line(&state.logs, format!("HTTP 下载：{}", virtual_path));
-                let mut headers = HeaderMap::new();
-                let mime = mime_guess::from_path(&local).first_or_octet_stream();
-                if let Ok(value) = HeaderValue::from_str(mime.as_ref()) {
-                    headers.insert(header::CONTENT_TYPE, value);
-                }
-                headers.insert(header::CONTENT_LENGTH, HeaderValue::from_str(&metadata.len().to_string()).unwrap());
-                let filename = local.file_name().and_then(|x| x.to_str()).unwrap_or("download");
-                let encoded = utf8_percent_encode(filename, NON_ALPHANUMERIC);
-                let disposition = format!("attachment; filename*=UTF-8''{encoded}");
-                headers.insert(header::CONTENT_DISPOSITION, HeaderValue::from_str(&disposition).unwrap_or(HeaderValue::from_static("attachment")));
-                            let mut response = Response::new(Body::from_stream(ReaderStream::new(file)));
-                *response.status_mut() = StatusCode::OK;
-                *response.headers_mut() = headers;
-                response
-            }
-            Err(_) => simple_response(StatusCode::NOT_FOUND, "无法读取文件"),
-        },
-        _ => simple_response(StatusCode::NOT_FOUND, "文件或目录不存在"),
-    }
-}
-
-fn render_directory(virtual_path: &str, local: &Path) -> Result<String, io::Error> {
-    let mut entries = fs::read_dir(local)?.filter_map(Result::ok).collect::<Vec<_>>();
-    entries.sort_by_key(|entry| entry.file_name().to_string_lossy().to_lowercase());
-    let mut html = String::from(
-        "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>文件列表</title><style>body{font-family:Segoe UI,Microsoft YaHei,sans-serif;max-width:1000px;margin:30px auto;padding:0 20px;color:#1e293b}a{text-decoration:none;color:#2563eb}li{padding:9px;border-bottom:1px solid #eee}ul{list-style:none;padding:0}.muted{color:#64748b}</style></head><body><h2>文件列表</h2>",
-    );
-    html.push_str(&format!("<div class=\"muted\">当前位置：{}</div>", html_escape(virtual_path)));
-    html.push_str("<ul>");
-    if virtual_path != "/" {
-        let parent = virtual_parent(virtual_path);
-        html.push_str(&format!("<li>📁 <a href=\"{}\">返回上一级</a></li>", href_for_virtual(&parent, true)));
-    }
-    for entry in entries {
-        let name = entry.file_name().to_string_lossy().to_string();
-        let meta = match entry.metadata() { Ok(x) => x, Err(_) => continue };
-        let is_dir = meta.is_dir();
-        let child = if virtual_path == "/" { format!("/{name}") } else { format!("{virtual_path}/{name}") };
-        let href = href_for_virtual(&child, is_dir);
-        let display = html_escape(&name);
-        let prefix = if is_dir { "📁" } else { "📄" };
-        let size = if is_dir { String::new() } else { format!(" · {}", format_size(meta.len())) };
-        html.push_str(&format!("<li>{prefix} <a href=\"{href}\">{display}</a><span class=\"muted\">{size}</span></li>"));
-    }
-    html.push_str("</ul></body></html>");
-    Ok(html)
-}
-
-fn href_for_virtual(path: &str, directory: bool) -> String {
-    let mut parts = vec!["".to_string()];
-    for part in path.split('/').filter(|x| !x.is_empty()) {
-        parts.push(utf8_percent_encode(part, NON_ALPHANUMERIC).to_string());
-    }
-    let mut value = parts.join("/");
-    if directory && !value.ends_with('/') {
-        value.push('/');
-    }
-    if value.is_empty() { "/".to_string() } else { value }
-}
-
-fn virtual_parent(path: &str) -> String {
+pub(crate) fn virtual_parent(path: &str) -> String {
     let mut parts: Vec<&str> = path.split('/').filter(|x| !x.is_empty()).collect();
     parts.pop();
     if parts.is_empty() { "/".into() } else { format!("/{}", parts.join("/")) }
-}
-
-fn html_escape(value: impl AsRef<str>) -> String {
-    value.as_ref().replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&#39;")
-}
-
-fn format_size(size: u64) -> String {
-    const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
-    let mut n = size as f64;
-    let mut idx = 0usize;
-    while n >= 1024.0 && idx + 1 < UNITS.len() {
-        n /= 1024.0;
-        idx += 1;
-    }
-    if idx == 0 { format!("{} {}", size, UNITS[idx]) } else { format!("{n:.1} {}", UNITS[idx]) }
-}
-
-fn simple_response(status: StatusCode, text: &str) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
-        .body(Body::from(text.to_owned()))
-        .unwrap()
 }
 
 async fn run_servers(
@@ -444,11 +328,7 @@ async fn run_servers(
                 run_ftp_server(ftp_listener, ftp_root, ftp_config, ftp_logs, ftp_shutdown).await;
             });
 
-            let http_state = HttpState { root: root.clone(), logs: logs.clone() };
-            let http_app = Router::new()
-                .route("/", get(http_handler))
-                .route("/{*path}", get(http_handler))
-                .with_state(http_state);
+            let http_app = http::build_http_app(root.clone(), logs.clone(), config.anonymous_write_enabled);
             let http_logs = logs.clone();
             let http_shutdown = shutdown.clone();
             let mut http_task = tokio::spawn(async move {
@@ -483,11 +363,7 @@ async fn run_servers(
             let _ = ftp_task.await;
         }
         (None, Some(http_listener)) => {
-            let http_state = HttpState { root: root.clone(), logs: logs.clone() };
-            let http_app = Router::new()
-                .route("/", get(http_handler))
-                .route("/{*path}", get(http_handler))
-                .with_state(http_state);
+            let http_app = http::build_http_app(root.clone(), logs.clone(), config.anonymous_write_enabled);
             let http_logs = logs.clone();
             let http_shutdown = shutdown.clone();
             let mut http_task = tokio::spawn(async move {
@@ -545,11 +421,14 @@ struct FtpSession {
     user: Option<String>,
     authenticated: bool,
     passive: Option<TcpListener>,
+    /// 控制连接的本端地址，用于 PASV 应答时选择客户端实际可达的网卡 IPv4
+    local_addr: Option<SocketAddr>,
     logs: LogSink,
 }
 
 async fn handle_ftp_client(stream: TcpStream, root: Arc<PathBuf>, config: ServerConfig, logs: LogSink) -> Result<(), String> {
     let peer = stream.peer_addr().ok();
+    let local_addr = stream.local_addr().ok();
     let (read_half, write_half) = stream.into_split();
     let mut session = FtpSession {
         control: write_half,
@@ -559,6 +438,7 @@ async fn handle_ftp_client(stream: TcpStream, root: Arc<PathBuf>, config: Server
         user: None,
         authenticated: false,
         passive: None,
+        local_addr,
         logs,
     };
     session.reply("220 轻型文件服务器 FTP 服务就绪").await?;
@@ -723,11 +603,28 @@ impl FtpSession {
         if extended {
             self.reply(format!("229 Entering Extended Passive Mode (|||{}|)", port)).await?;
         } else {
-            let ip = passive_ipv4(&self.config).unwrap_or(Ipv4Addr::new(127, 0, 0, 1));
+            let ip = self.passive_ipv4().unwrap_or(Ipv4Addr::new(127, 0, 0, 1));
             let octets = ip.octets();
             self.reply(format!("227 Entering Passive Mode ({},{},{},{},{},{})", octets[0], octets[1], octets[2], octets[3], port / 256, port % 256)).await?;
         }
         Ok(())
+    }
+
+    /// PASV 应答里应当通告的 IPv4 地址。
+    ///
+    /// 优先使用配置项 `public_host`；否则使用控制连接的本端地址：本机客户端
+    /// （127.0.0.1）得到 127.0.0.1，局域网客户端得到其实际连入的网卡地址。
+    /// 这样即使机器有多个网卡（VPN、虚拟网卡等），也不会把不通的地址告诉客户端。
+    fn passive_ipv4(&self) -> Option<Ipv4Addr> {
+        if let Ok(ip) = self.config.public_host.trim().parse::<Ipv4Addr>() {
+            return Some(ip);
+        }
+        if let Some(addr) = self.local_addr {
+            if let IpAddr::V4(ip) = addr.ip() {
+                return Some(ip);
+            }
+        }
+        detect_local_ipv4()
     }
 
     async fn data_stream(&mut self) -> Result<TcpStream, String> {
@@ -829,11 +726,6 @@ async fn bind_passive_listener(start: u16, end: u16) -> Result<TcpListener, Stri
         }
     }
     Err("被动端口范围内没有可用端口".into())
-}
-
-fn passive_ipv4(config: &ServerConfig) -> Option<Ipv4Addr> {
-    if let Ok(ip) = config.public_host.parse::<Ipv4Addr>() { return Some(ip); }
-    detect_local_ipv4()
 }
 
 #[tauri::command]
